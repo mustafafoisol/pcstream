@@ -1,5 +1,7 @@
 # PCStream
 
+[![Build APK](https://github.com/mustafafoisol/pcstream/actions/workflows/android.yml/badge.svg)](https://github.com/mustafafoisol/pcstream/actions/workflows/android.yml)
+
 Stream files from a folder on your PC to an Android 10+ phone on the same Wi-Fi.
 
 - `pcserver/` — small Python 3 server (standard library only) that shares one folder read-only over HTTP, with `Range` support so you can seek.
