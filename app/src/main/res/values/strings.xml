@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PCStream</string>
+    <string name="server_url_hint">Server URL, e.g. http://192.168.1.20:8765</string>
+    <string name="token_hint">Token (leave empty if the server has none)</string>
+    <string name="connect">Connect</string>
+    <string name="up">Up</string>
+    <string name="settings">Server settings</string>
+</resources>
