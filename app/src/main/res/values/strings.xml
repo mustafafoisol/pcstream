@@ -5,5 +5,7 @@
     <string name="token_hint">Token (leave empty if the server has none)</string>
     <string name="connect">Connect</string>
     <string name="up">Up</string>
+    <string name="screen">Screen</string>
+    <string name="pick_screen">Share which screen?</string>
     <string name="settings">Server settings</string>
 </resources>

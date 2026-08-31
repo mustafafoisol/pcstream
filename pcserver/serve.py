@@ -14,9 +14,13 @@ import os
 import posixpath
 import re
 import socket
+import subprocess
 import sys
+import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import screencap
 
 RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)$")
 CHUNK = 256 * 1024
@@ -33,6 +37,11 @@ mimetypes.add_type("audio/flac", ".flac")
 class Config:
     root = os.getcwd()
     token = ""
+    screen = True          # screen sharing available at all
+    audio = "auto"         # 'auto', 'none', or a dshow device name
+    fps = 30
+    height = 720           # 0 keeps the monitor's native height
+    bitrate = "4M"
 
 
 def safe_join(root, rel):
@@ -97,8 +106,12 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
 
         if path == "/api/ping":
-            return self._send_json({"ok": True, "name": socket.gethostname(),
-                                    "auth": bool(Config.token)})
+            return self._send_json({
+                "ok": True,
+                "name": socket.gethostname(),
+                "auth": bool(Config.token),
+                "screen": Config.screen and screencap.ffmpeg_available(),
+            })
         if not self._authorized():
             return self._fail(401, "bad or missing token")
         if path == "/api/list":
@@ -106,6 +119,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._list(rel)
         if path.startswith("/media/"):
             return self._media(path[len("/media/"):])
+        if path == "/api/screens":
+            return self._screens()
+        if path == "/screen.ts":
+            return self._screen_stream(urllib.parse.parse_qs(parsed.query))
         return self._fail(404, "not found")
 
     def _list(self, rel):
@@ -189,6 +206,103 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass  # player seeked away or closed the stream
 
+    # ---------- screen sharing ----------
+
+    def _screens(self):
+        if not Config.screen:
+            return self._fail(403, "screen sharing is disabled (--no-screen)")
+        if not screencap.ffmpeg_available():
+            return self._fail(501, "ffmpeg is not installed or not on PATH")
+        audio = screencap.pick_audio_device(Config.audio)
+        return self._send_json({
+            "monitors": screencap.list_monitors(),
+            "audio": audio,
+            "audioDevices": screencap.list_audio_devices(),
+            "encoder": screencap.pick_encoder()[0],
+            "fps": Config.fps,
+            "height": Config.height,
+        })
+
+    def _screen_stream(self, query):
+        if not Config.screen:
+            return self._fail(403, "screen sharing is disabled (--no-screen)")
+        if not screencap.ffmpeg_available():
+            return self._fail(501, "ffmpeg is not installed or not on PATH")
+
+        def arg(name, default):
+            try:
+                return int(query.get(name, [default])[0])
+            except (TypeError, ValueError):
+                return default
+
+        monitors = screencap.list_monitors()
+        monitor = screencap.find_monitor(monitors, arg("monitor", 0))
+        if monitor is None:
+            return self._fail(404, "no such monitor")
+
+        cmd = screencap.build_command(
+            monitor,
+            fps=max(5, min(60, arg("fps", Config.fps))),
+            height=max(0, min(2160, arg("height", Config.height))),
+            bitrate=query.get("bitrate", [Config.bitrate])[0],
+            audio_device=screencap.pick_audio_device(Config.audio),
+            draw_mouse=arg("mouse", 1) == 1,
+        )
+        self.log_message("screen: %s", " ".join(cmd[-14:]))
+
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    bufsize=0)
+        except OSError as e:
+            return self._fail(500, "could not start ffmpeg: %s" % e)
+
+        # Drain stderr so a chatty ffmpeg can never block on a full pipe.
+        state = {"stopping": False}
+        threading.Thread(target=self._drain, args=(proc.stderr, state), daemon=True).start()
+
+        # Live stream of unknown length: no Content-Length, close when done.
+        self.send_response(200)
+        self.send_header("Content-Type", "video/mp2t")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        if self.command == "HEAD":
+            state["stopping"] = True
+            proc.kill()
+            return
+
+        try:
+            while True:
+                buf = proc.stdout.read(32 * 1024)
+                if not buf:
+                    break
+                self.wfile.write(buf)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # phone closed the player
+        finally:
+            # The phone is gone, so stop burning CPU on encoding immediately.
+            state["stopping"] = True
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            self.log_message("screen: stopped")
+
+    def _drain(self, stream, state):
+        try:
+            for line in iter(stream.readline, b""):
+                # Once the viewer has left, ffmpeg complains about the closed
+                # pipe on its way out; that is expected, not worth printing.
+                if state["stopping"]:
+                    continue
+                text = line.decode("utf-8", "replace").rstrip()
+                if text:
+                    sys.stderr.write("[ffmpeg] %s\n" % text)
+        except (ValueError, OSError):
+            pass
+
     def _range_not_satisfiable(self, size):
         self.send_response(416)
         self.send_header("Content-Range", "bytes */%d" % size)
@@ -203,10 +317,32 @@ def main():
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--token", default=os.environ.get("PCSTREAM_TOKEN", ""),
                     help="shared secret the app must send (optional but recommended)")
+    ap.add_argument("--no-screen", action="store_true", help="disable screen sharing")
+    ap.add_argument("--audio", default="auto",
+                    help="'auto' (find a loopback device), 'none', or a DirectShow device name")
+    ap.add_argument("--fps", type=int, default=30, help="screen capture frame rate")
+    ap.add_argument("--height", type=int, default=720,
+                    help="scale the screen down to this height (0 = native)")
+    ap.add_argument("--bitrate", default="4M", help="screen video bitrate")
+    ap.add_argument("--list-audio", action="store_true",
+                    help="print the DirectShow audio devices ffmpeg can see, then exit")
     args = ap.parse_args()
+
+    if args.list_audio:
+        devices = screencap.list_audio_devices()
+        if not devices:
+            print("No DirectShow audio devices found.")
+        for d in devices:
+            print("%-50s %s" % (d["name"], "<- loopback (desktop audio)" if d["loopback"] else "microphone"))
+        return
 
     Config.root = os.path.realpath(args.root)
     Config.token = args.token
+    Config.screen = not args.no_screen
+    Config.audio = args.audio
+    Config.fps = args.fps
+    Config.height = args.height
+    Config.bitrate = args.bitrate
     if not os.path.isdir(Config.root):
         sys.exit("root folder does not exist: " + Config.root)
 
@@ -215,6 +351,21 @@ def main():
     print("Sharing : %s" % Config.root)
     print("URL     : http://%s:%d" % (lan_ip(), args.port))
     print("Token   : %s" % (Config.token or "(none - open to your LAN)"))
+
+    if Config.screen and screencap.ffmpeg_available():
+        monitors = screencap.list_monitors()
+        audio = screencap.pick_audio_device(Config.audio)
+        print("Screens : %d (%s)" % (len(monitors), screencap.pick_encoder()[0]))
+        if audio:
+            print("Audio   : %s" % audio)
+        elif Config.audio == "none":
+            print("Audio   : off (--audio none)")
+        else:
+            print("Audio   : NONE - no desktop-audio device found, screen share will be silent.")
+            print("          Run with --list-audio, or see README 'Desktop audio'.")
+    elif Config.screen:
+        print("Screens : unavailable - ffmpeg is not on PATH")
+
     print("Enter that URL in the Android app. Ctrl+C to stop.")
     try:
         srv.serve_forever()

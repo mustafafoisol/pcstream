@@ -16,6 +16,9 @@ data class Entry(
     val mime: String
 )
 
+/** A monitor the PC can share. Index -1 means "all screens at once". */
+data class Monitor(val index: Int, val label: String)
+
 class ServerException(message: String) : IOException(message)
 
 /**
@@ -50,6 +53,29 @@ class ServerClient(baseUrl: String, private val token: String) {
                 mime = o.optString("mime", "application/octet-stream")
             )
         }
+    }
+
+    /** Monitors available for screen sharing. Empty if the PC has none. */
+    fun screens(): List<Monitor> {
+        val json = getJson("$base/api/screens")
+        val arr = json.getJSONArray("monitors")
+        return (0 until arr.length()).map { i ->
+            val o = arr.getJSONObject(i)
+            Monitor(o.getInt("index"), o.getString("label"))
+        }
+    }
+
+    /** True when the PC reports ffmpeg present and screen sharing enabled. */
+    fun screenSupported(): Boolean = getJson("$base/api/ping").optBoolean("screen", false)
+
+    /** Whether the PC found a desktop-audio device; null when it did not. */
+    fun screenAudioDevice(): String? =
+        getJson("$base/api/screens").optString("audio", "").ifEmpty { null }
+
+    /** Live MPEG-TS URL for one monitor. */
+    fun screenUrl(monitor: Int, height: Int = 720, fps: Int = 30): String {
+        val url = "$base/screen.ts?monitor=$monitor&height=$height&fps=$fps"
+        return if (token.isEmpty()) url else "$url&token=${Uri.encode(token)}"
     }
 
     /**

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.view.View
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.DividerItemDecoration
@@ -38,6 +39,7 @@ class MainActivity : AppCompatActivity() {
 
         binding.connectButton.setOnClickListener { connect() }
         binding.upButton.setOnClickListener { goUp() }
+        binding.screenButton.setOnClickListener { pickScreen() }
         binding.upButton.visibility = View.GONE
 
         if (!binding.urlInput.text.isNullOrBlank()) connect()
@@ -84,6 +86,47 @@ class MainActivity : AppCompatActivity() {
     private fun goUp() {
         if (currentPath.isEmpty()) return
         load(currentPath.substringBeforeLast('/', ""))
+    }
+
+    /** Ask the PC which monitors it has, then let the user choose one. */
+    private fun pickScreen() {
+        val c = client
+        if (c == null) {
+            toast("Connect to the server first")
+            return
+        }
+        binding.statusText.text = "Looking for screens…"
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { c.screens() to c.screenAudioDevice() }
+            }
+            result.onSuccess { (monitors, audioDevice) ->
+                binding.statusText.text = ""
+                if (monitors.isEmpty()) {
+                    toast("The PC reported no screens")
+                    return@onSuccess
+                }
+                if (audioDevice == null) {
+                    toast("No desktop-audio device on the PC — this will be silent")
+                }
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle(R.string.pick_screen)
+                    .setItems(monitors.map { it.label }.toTypedArray()) { _, which ->
+                        startScreen(c, monitors[which])
+                    }
+                    .show()
+            }.onFailure { e ->
+                binding.statusText.text = "Screen sharing unavailable: ${e.message}"
+            }
+        }
+    }
+
+    private fun startScreen(c: ServerClient, monitor: Monitor) {
+        startActivity(Intent(this, PlayerActivity::class.java).apply {
+            putExtra(PlayerActivity.EXTRA_URL, c.screenUrl(monitor.index))
+            putExtra(PlayerActivity.EXTRA_TITLE, monitor.label)
+            putExtra(PlayerActivity.EXTRA_LIVE, true)
+        })
     }
 
     private fun onEntryClicked(entry: Entry) {

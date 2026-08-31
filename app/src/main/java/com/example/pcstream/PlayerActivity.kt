@@ -9,6 +9,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import com.example.pcstream.databinding.ActivityPlayerBinding
 
@@ -40,7 +41,18 @@ class PlayerActivity : AppCompatActivity() {
             finish()
             return
         }
-        val exo = ExoPlayer.Builder(this).build()
+        val live = intent.getBooleanExtra(EXTRA_LIVE, false)
+        val builder = ExoPlayer.Builder(this)
+        if (live) {
+            // A screen share is worth watching only if it is close to now, so
+            // buffer as little as playback can tolerate.
+            builder.setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(1_000, 4_000, 500, 1_000)
+                    .build()
+            )
+        }
+        val exo = builder.build()
         binding.playerView.player = exo
         exo.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
@@ -91,6 +103,7 @@ class PlayerActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_URL = "url"
         const val EXTRA_TITLE = "title"
+        const val EXTRA_LIVE = "live"
         private const val STATE_POSITION = "position"
         private const val STATE_PLAY_WHEN_READY = "playWhenReady"
     }
